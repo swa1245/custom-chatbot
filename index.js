@@ -1,27 +1,85 @@
-import { MessagesAnnotation, StateGraph } from "@langchain/langgraph";
-import { HumanMessage } from "langchain";
+import dotenv from "dotenv";
+dotenv.config();
+
 import readline from "readline/promises";
 
-// step 1 define node fucntions
-// step 2 build the graph
-// 3 complie and invoke the graph
+import { ChatGroq } from "@langchain/groq";
 
-function callModel(state) {
-  // call the llm using apis
-  console.log("Calling the model with messages: ");
-  return state;
+import { MessagesAnnotation, StateGraph } from "@langchain/langgraph";
+
+import { ToolNode, toolsCondition } from "@langchain/langgraph/prebuilt";
+
+import { HumanMessage, SystemMessage } from "@langchain/core/messages";
+
+import { TavilySearch } from "@langchain/tavily";
+
+
+// TOOL SETUP
+
+
+const searchTool = new TavilySearch({
+  maxResults: 3,
+  topic: "general",
+  apiKey: process.env.TAVILY_API_KEY,
+});
+
+const toolNode = new ToolNode([searchTool]);
+
+
+// LLM SETUP
+
+
+const llm = new ChatGroq({
+  model: "openai/gpt-oss-120b",
+  temperature: 0,
+  maxRetries: 2,
+  apiKey: process.env.GROQ_API_KEY,
+}).bindTools([searchTool]);
+
+
+// MODEL NODE
+
+
+async function callModel(state) {
+  console.log("\nCalling model...\n");
+
+  const response = await llm.invoke([
+    new SystemMessage(`
+You are a helpful AI assistant.
+
+Rules:
+- Use tools whenever live/current information is needed.
+- Never return raw JSON.
+- Summarize tool results naturally.
+- Keep answers readable and concise.
+- Format answers properly.
+`),
+
+    ...state.messages,
+  ]);
+
+  return {
+    messages: [response],
+  };
 }
 
-// build the graph
-const workFlow = new StateGraph(MessagesAnnotation)
+
+// GRAPH
+
+
+const workflow = new StateGraph(MessagesAnnotation)
   .addNode("agent", callModel)
+
+  .addNode("tools", toolNode)
+
   .addEdge("__start__", "agent")
-  .addEdge("agent", "__end__");
 
+  .addConditionalEdges("agent", toolsCondition)
 
-// compile and invoke the graph
+  .addEdge("tools", "agent");
 
-const app = workFlow.compile();
+// compile graph
+const app = workflow.compile();
 
 
 async function main() {
@@ -29,14 +87,30 @@ async function main() {
     input: process.stdin,
     output: process.stdout,
   });
+
   while (true) {
-    const userInp = await rl.question("What is your name? ");
-    // invoke the graph
+    const userInp = await rl.question("\nYou: ");
+
+    if (userInp.toLowerCase() === "exit") {
+      console.log("\nGoodbye 👋");
+      break;
+    }
+
     const finalState = await app.invoke({
-      messages : [{role:'user', content: userInp}]
+      messages: [new HumanMessage(userInp)],
     });
-    console.log(finalState);
+
+    // get latest AI message
+    const aiMessages = finalState.messages.filter(
+      (msg) => msg.constructor.name === "AIMessage",
+    );
+
+    const lastAIMessage = aiMessages[aiMessages.length - 1];
+
+    console.log("\nAI:", lastAIMessage.content);
   }
+
   rl.close();
 }
+
 main();
